@@ -1,0 +1,285 @@
+unit Unit1;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, StdCtrls, ShellAPI;
+
+const
+  WM_ICONTRAY = WM_USER + 1;
+  // APM messages
+
+  PBT_APMQUERYSUSPEND       = $0000;
+  PBT_APMQUERYSTANDBY       = $0001;
+  PBT_APMQUERYSUSPENDFAILED = $0002;
+  PBT_APMQUERYSTANDBYFAILED = $0003;
+  PBT_APMSUSPEND            = $0004;
+  PBT_APMSTANDBY            = $0005;
+  PBT_APMRESUMECRITICAL     = $0006;
+  PBT_APMRESUMESUSPEND      = $0007;
+  PBT_APMRESUMESTANDBY      = $0008;
+  PBT_APMBATTERYLOW         = $0009;
+  PBT_APMPOWERSTATUSCHANGE  = $000A;
+  PBT_APMOEMEVENT           = $000B;
+  PBTF_APMRESUMEFROMFAILURE = $00000001;
+  PBT_APMRESUMEAUTOMATIC    = $0012;
+
+  // SetThreadExecutionState flags
+const
+  ES_CONTINUOUS              =  $80000000;
+  ES_DISPLAY_REQUIRED        =  $00000002;
+  ES_SYSTEM_REQUIRED         =  $00000001;
+
+function SetThreadExecutionState(esFlags: DWORD): DWORD; stdcall; external 'kernel32.dll';
+
+type
+  EXECUTION_STATE=DWORD;
+
+type
+  Tmainform = class(TForm)
+    debuginfo: TMemo;
+    Button1: TButton;
+    procedure FormCreate(Sender: TObject);
+    procedure FormDestroy(Sender: TObject);
+    procedure FormClose(Sender: TObject; var Action: TCloseAction);
+    procedure Button1Click(Sender: TObject);
+  private
+     TrayIconData: TNotifyIconData;
+     procedure Icontray(var Msg: TMessage); message WM_ICONTRAY;
+    { Private-Deklarationen }
+  public
+      procedure WMPOWERBROADCAST( var Message: TMessage); message WM_POWERBROADCAST;
+      procedure WMSysCommand(var Msg: TWMSysCommand); message WM_SYSCOMMAND;
+      procedure WMQUERYENDSESSION(var msg: TMessage); message WM_QUERYENDSESSION;
+      procedure WMENDSESSION(var msg: TMessage); message WM_ENDSESSION;
+      procedure OnResume(var Msg: TMessage);
+      procedure OnSuspend(var Msg: TMessage);
+    { Public-Deklarationen }
+  end;
+
+var
+  mainform : Tmainform;
+  KernelHandle : Thandle;
+  resumerunning : Boolean = false;
+  suspendrunning : Boolean = false;
+
+implementation
+
+{$R *.dfm}
+
+procedure Tmainform.Icontray(var Msg: TMessage);
+var
+  CursorPos : TPoint;
+begin
+  if Msg.lParam = WM_LBUTTONDOWN then begin
+    GetCursorPos(CursorPos);
+    SetForegroundWindow(Handle);        // suggested by Berend Radstaat
+    Application.BringToFront;
+    Application.RestoreTopMosts;
+    Show();
+    SetForegroundWindow(Handle);        // suggested by Berend Radstaat
+    PostMessage(Handle, WM_NULL, 0, 0); // suggested by Berend Radstaat
+    SetForegroundWindow(Handle);        // suggested by Berend Radstaat
+  end else
+    inherited;
+end;
+
+procedure Tmainform.Button1Click(Sender: TObject);
+begin
+ Application.Terminate;
+end;
+
+procedure Tmainform.FormClose(Sender: TObject; var Action: TCloseAction);
+begin
+  Action := caNone;
+  Hide;
+end;
+
+procedure Tmainform.FormCreate(Sender: TObject);
+begin
+  with TrayIconData do
+  begin
+    cbSize := SizeOf(TrayIconData);
+    Wnd := Handle;
+    uID := 0;
+    uFlags := NIF_MESSAGE + NIF_ICON + NIF_TIP;
+    uCallbackMessage := WM_ICONTRAY;
+    hIcon := Application.Icon.Handle;
+    StrPCopy(szTip, Application.Title);
+  end;
+
+  Shell_NotifyIcon(NIM_ADD, @TrayIconData);
+end;
+
+procedure Tmainform.FormDestroy(Sender: TObject);
+begin
+  Shell_NotifyIcon(NIM_DELETE, @TrayIconData);
+end;
+
+procedure Tmainform.WMENDSESSION(var msg: TMessage);
+begin
+  inherited;
+  debuginfo.Lines.Insert(0, 'Windows shutdown mode executed');
+  msg.Result := 0;
+  Application.Terminate;
+end;
+
+procedure Tmainform.WMQUERYENDSESSION(var msg: TMessage);
+begin
+  inherited;
+  debuginfo.Lines.Insert(0, 'Windows is requesting shutdown mode');
+  msg.Result := 1;
+end;
+
+procedure Tmainform.WMPOWERBROADCAST( var Message: TMessage); //womMZ,2000,XP
+begin
+  inherited;
+  debuginfo.Lines.Insert(0, 'Received WMPOWERBROADCAST Id: '+inttostr(Message.WParam));
+
+  if (Message.WParam = PBT_APMQUERYSUSPEND) then
+  begin
+     debuginfo.Lines.Insert(0, 'Windows is asking for hibernate Mode');
+  end
+   else if (Message.WParam = PBT_APMQUERYSTANDBY) then
+  begin
+     debuginfo.Lines.Insert(0, 'Windows is asking for standby Mode');
+  end
+   else if (Message.WParam = PBT_APMQUERYSUSPENDFAILED) then
+  begin
+     debuginfo.Lines.Insert(0, 'Windows is denied to go to hibernate mode');
+  end
+   else if (Message.WParam = PBT_APMQUERYSTANDBYFAILED) then
+  begin
+     debuginfo.Lines.Insert(0, 'Windows is denied to go to standby mode');
+  end
+   else if (Message.WParam = PBT_APMSTANDBY) then
+  begin
+     debuginfo.Lines.Insert(0, 'Windows is going to standby');
+     OnSuspend(Message);
+  end
+   else if (Message.WParam = PBT_APMSUSPEND) then
+  begin
+     debuginfo.Lines.Insert(0, 'Windows is going to hibernate');
+     OnSuspend(Message);
+  end
+   else if (Message.WParam = PBT_APMRESUMECRITICAL) then
+  begin
+     debuginfo.Lines.Insert(0, 'Windows has resumed from critical hibernate mode');
+     onResume(Message);
+  end
+   else if (Message.WParam = PBT_APMRESUMESUSPEND) then
+  begin
+     debuginfo.Lines.Insert(0, 'Windows has resumed from hibernate mode');
+     onResume(Message);
+  end
+   else if (Message.WParam = PBT_APMRESUMESTANDBY) then
+  begin
+     debuginfo.Lines.Insert(0, 'Windows has resumed from standby mode');
+     onResume(Message);
+  end
+   else if (Message.WParam = PBT_APMRESUMEAUTOMATIC) then
+  begin
+     debuginfo.Lines.Insert(0, 'Windows has resumed to handle an automatic event');
+     onResume(Message);
+  end;
+
+end;
+
+procedure Tmainform.OnResume(var Msg: TMessage);
+var
+  Info: TShellExecuteInfo;
+  pInfo: PShellExecuteInfo;
+  exitCode: DWord;
+begin
+    if (resumerunning) then
+    begin
+      debuginfo.Lines.Insert(0, 'Resume is already running go to exit');
+      exit;
+    end;
+    resumerunning := true;
+
+    debuginfo.Lines.Insert(0, 'Trying to wake up monitor / tv');
+    SetThreadExecutionState(ES_DISPLAY_REQUIRED or ES_CONTINUOUS);
+    debuginfo.Lines.Insert(0, 'Starting '+ExtractFilePath(Application.ExeName)+'\start_mp.bat');
+
+//    ShellExecute(Handle, NIL,PCHAR(ExtractFilePath(Application.ExeName)+'\start_mp.bat'),PCHAR(''),PCHAR(ExtractFilePath(Application.ExeName)),SW_SHOW);
+
+  pInfo := @Info;
+  with Info do
+  begin
+    cbSize := SizeOf(Info);
+    fMask  := SEE_MASK_NOCLOSEPROCESS;
+    wnd    := application.Handle;
+    lpVerb := NIL;
+    lpFile := PChar(ExtractFilePath(Application.ExeName)+'\start_mp.bat');
+    lpParameters := PChar(#0);
+    lpDirectory  := PCHAR(ExtractFilePath(Application.ExeName));
+    nShow        := SW_SHOWNORMAL;
+    hInstApp     := 0;
+  end;
+  ShellExecuteEx(pInfo);
+  repeat
+    exitCode := WaitForSingleObject(Info.hProcess, 500);
+    Application.ProcessMessages;
+  until (exitCode <> WAIT_TIMEOUT);
+
+    debuginfo.Lines.Insert(0, 'Starting '+ExtractFilePath(Application.ExeName)+'\start_mp.bat'+ ' DONE');
+
+    SetThreadExecutionState(ES_CONTINUOUS);
+
+    resumerunning := false;
+end;
+
+procedure Tmainform.OnSuspend(var Msg: TMessage);
+var
+  Info: TShellExecuteInfo;
+  pInfo: PShellExecuteInfo;
+  exitCode: DWord;
+begin
+    if (suspendrunning) then
+    begin
+      debuginfo.Lines.Insert(0, 'Suspend is already running go to exit');
+      exit;
+    end;
+    suspendrunning := true;
+    
+    debuginfo.Lines.Insert(0, 'Starting '+ExtractFilePath(Application.ExeName)+'\stop_mp.bat');
+
+//    ShellExecute(Handle, NIL,PCHAR(ExtractFilePath(Application.ExeName)+'\stop_mp.bat'),PCHAR(''),PCHAR(ExtractFilePath(Application.ExeName)),SW_SHOW);
+
+  pInfo := @Info;
+  with Info do
+  begin
+    cbSize := SizeOf(Info);
+    fMask  := SEE_MASK_NOCLOSEPROCESS;
+    wnd    := application.Handle;
+    lpVerb := NIL;
+    lpFile := PChar(ExtractFilePath(Application.ExeName)+'\stop_mp.bat');
+    lpParameters := PChar(#0);
+    lpDirectory  := PCHAR(ExtractFilePath(Application.ExeName));
+    nShow        := SW_SHOWNORMAL;
+    hInstApp     := 0;
+  end;
+  ShellExecuteEx(pInfo);
+  repeat
+    exitCode := WaitForSingleObject(Info.hProcess, 500);
+    Application.ProcessMessages;
+  until (exitCode <> WAIT_TIMEOUT);
+
+  debuginfo.Lines.Insert(0, 'Starting '+ExtractFilePath(Application.ExeName)+'\stop_mp.bat'+ ' DONE');
+
+  suspendrunning := false;
+end;
+
+procedure Tmainform.WMSysCommand(var Msg: TWMSysCommand);
+begin
+ inherited;
+ Case Msg.CmdType of
+  SC_MINIMIZE: begin
+  Hide;  end;
+ end;
+ DefaultHandler(Msg);
+end;
+
+end.
